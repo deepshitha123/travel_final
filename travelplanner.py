@@ -1,115 +1,135 @@
-import os
-import googlemaps
-import networkx as nx
-import matplotlib.pyplot as plt
-from itertools import permutations
 import streamlit as st
+import requests
+import openrouteservice
+import folium
+from streamlit_folium import folium_static  # Install this package if you haven't
+import json
 
-# Streamlit page setup
-st.title("Travel Planner - Shortest Path Using Google Maps API")
-st.write("This app calculates the shortest path between selected places using real-world distances.")
+# API Keys (replace with your own keys)
+ORS_API_KEY = "5b3ce3597851110001cf6248dbc0d825bf6d4b69b125fac5de442cbf"
+WEATHER_API_KEY = "32b81c71eced042b3edd4ffd4835d21d"
+GOOGLE_MAPS_API_KEY = "AIzaSyD_MbTkxPCg2OS6xw5YOkM8KHaKENCoyf0"  # Your Google Maps API key
 
-# Get the API key from the environment variable or directly input it
-API_KEY = st.secrets["API_KEY"]  # Ensure your secrets.toml has this key
+# Initialize OpenRouteService client
+client = openrouteservice.Client(key=ORS_API_KEY)
 
-# Initialize the Google Maps API client
-gmaps = googlemaps.Client(key=API_KEY)
-
-# Define the list of places in Chennai and Thiruvallur with more specificity
-places_in_chennai = [
-    'T. Nagar, Chennai, Tamil Nadu', 'Anna Nagar, Chennai, Tamil Nadu', 
-    'Velachery, Chennai, Tamil Nadu', 'Adyar, Chennai, Tamil Nadu', 
-    'Mylapore, Chennai, Tamil Nadu', 'Nungambakkam, Chennai, Tamil Nadu', 
-    'Tambaram, Chennai, Tamil Nadu', 'Chrompet, Chennai, Tamil Nadu', 
-    'Guindy, Chennai, Tamil Nadu', 'Alwarpet, Chennai, Tamil Nadu', 
-    'Egmore, Chennai, Tamil Nadu', 'Triplicane, Chennai, Tamil Nadu', 
-    'Perambur, Chennai, Tamil Nadu', 'Thiruvanmiyur, Chennai, Tamil Nadu', 
-    'Royapettah, Chennai, Tamil Nadu', 'Vadapalani, Chennai, Tamil Nadu', 
-    'Koyambedu, Chennai, Tamil Nadu', 'Ashok Nagar, Chennai, Tamil Nadu', 
-    'Madipakkam, Chennai, Tamil Nadu', 'Sholinganallur, Chennai, Tamil Nadu'
-]
-
-places_in_thiruvallur = [
-    'Thiruvallur, Tamil Nadu', 'Poonamallee, Tamil Nadu', 'Avadi, Tamil Nadu', 
-    'Tiruttani, Tamil Nadu', 'Tiruvottiyur, Tamil Nadu', 'Minjur, Tamil Nadu', 
-    'Ambattur, Tamil Nadu', 'Red Hills, Tamil Nadu', 'Gummidipoondi, Tamil Nadu', 
-    'Pattabiram, Tamil Nadu'
-]
-
-# Combine places from Chennai and Thiruvallur
-places = places_in_chennai + places_in_thiruvallur
-
-# Streamlit multiselect for place selection
-st.write("Select two places to calculate the shortest driving path:")
-start = st.selectbox('Select Start Place:', places)
-end = st.selectbox('Select End Place:', places)
-
-# Create a directed graph
-G = nx.DiGraph()
-
-# Function to get distance between two places using Google Maps API
-@st.cache_data(show_spinner=True)
-def get_distance(origin, destination):
+# Function to get real-time weather data
+def get_weather(city):
     try:
-        result = gmaps.distance_matrix(origins=origin, destinations=destination, mode='driving')
-        element = result['rows'][0]['elements'][0]
+        weather_url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
+        response = requests.get(weather_url)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        st.error(f"Error getting weather: {e}")
+        return None
 
-        # Check if the distance field is available
-        if element.get('distance'):
-            distance = element['distance']['value']  # distance in meters
-            duration = element['duration']['value']  # duration in seconds
-            return distance / 1000, duration / 3600  # convert to kilometers and hours
+# Function to get coordinates using Google Maps API
+def get_coordinates(place):
+    try:
+        geocode_url = f"https://maps.googleapis.com/maps/api/geocode/json?address={place}&key={GOOGLE_MAPS_API_KEY}"
+        response = requests.get(geocode_url)
+        response.raise_for_status()
+        results = response.json()
+        if results['status'] == 'OK':
+            coords = results['results'][0]['geometry']['location']
+            return (coords['lng'], coords['lat'])
         else:
-            st.error(f"No distance data available for {origin} to {destination}")
-            return None, None
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return None, None
+            st.error("Place not found. Please try another location.")
+            return None
+    except requests.RequestException as e:
+        st.error(f"Error getting coordinates: {e}")
+        return None
 
-# Add edges with distances and durations between all pairs of places
-for origin, destination in permutations(places, 2):
-    distance, duration = get_distance(origin, destination)
-    if distance is not None:
-        G.add_edge(origin, destination, distance=distance, duration=duration)
-
-# Function to find the shortest path
-def find_shortest_path(graph, start_place, end_place, weight='distance'):
+# Function to get directions between two points
+def get_directions(start_coords, end_coords):
     try:
-        path = nx.shortest_path(graph, source=start_place, target=end_place, weight=weight)
-        total_distance = nx.shortest_path_length(graph, source=start_place, target=end_place, weight=weight)
-        return path, total_distance
-    except nx.NetworkXNoPath:
-        st.error("No path found between the selected places.")
-        return None, None
+        # Fetching directions
+        route = client.directions(coordinates=[start_coords, end_coords], profile='driving-car', format='geojson')
+        return route
+    except Exception as e:
+        st.error(f"Error getting directions: {e}")
+        return None
 
-# Function to visualize the graph with the shortest path
-def plot_graph(graph, path=None):
-    plt.figure(figsize=(10, 8))
-    pos = nx.spring_layout(graph, seed=42)  # Use spring layout for better spacing
-    labels = nx.get_edge_attributes(graph, 'distance')
+# Streamlit UI styling
+st.markdown("""<style>
+body {
+    background-image: url('https://www.yourimageurl.com/travel_bg.jpg');
+    background-size: cover;
+}
+.stButton button {
+    background-color: #4CAF50;
+    color: white;
+    border-radius: 12px;
+    padding: 10px;
+    font-size: 16px;
+}
+.stTextInput > div > input {
+    background-color: #f1f1f1;
+    border: 2px solid #ccc;
+    padding: 10px;
+}
+h1, h2, h3 {
+    color: #4CAF50;
+}
+</style>""", unsafe_allow_html=True)
 
-    # Draw the graph
-    nx.draw(graph, pos, with_labels=True, node_size=3000, node_color='lightblue', font_size=10)
-    nx.draw_networkx_edge_labels(graph, pos, edge_labels=labels, font_color='green')
+# Streamlit app title
+st.title("🌍 Advanced Travel Planner with Real-Time Maps")
 
-    # Highlight the shortest path in red
-    if path:
-        path_edges = list(zip(path, path[1:]))
-        nx.draw_networkx_edges(graph, pos, edgelist=path_edges, edge_color='red', width=3)
+# User inputs: Start and End points
+start_point = st.text_input("📍 Enter your starting location:")
+end_point = st.text_input("📍 Enter your destination:")
 
-    plt.title("Place-to-Place Network")
-    st.pyplot(plt)
+# Button to confirm
+if st.button("🔍 Get Directions"):
+    if start_point and end_point:
+        st.write(f"Fetching directions from **{start_point}** to **{end_point}**...")
 
-# Streamlit button to trigger the shortest path calculation
-if st.button('Find Shortest Path'):
-    if start == end:
-        st.error("Please select two different places.")
+        # Get coordinates
+        start_coords = get_coordinates(start_point)
+        end_coords = get_coordinates(end_point)
+
+        if start_coords and end_coords:
+            # Get directions
+            directions = get_directions(start_coords, end_coords)
+
+            if directions:
+                route = directions['features'][0]['geometry']['coordinates']
+                st.success("Route fetched successfully!")
+
+                # Create a Folium map centered between start and end points
+                map_center = [(start_coords[1] + end_coords[1]) / 2, (start_coords[0] + end_coords[0]) / 2]
+                m = folium.Map(location=map_center, zoom_start=13)
+
+                # Add start and end points
+                folium.Marker(location=[start_coords[1], start_coords[0]], popup='Start', icon=folium.Icon(color='green')).add_to(m)
+                folium.Marker(location=[end_coords[1], end_coords[0]], popup='Destination', icon=folium.Icon(color='red')).add_to(m)
+
+                # Add the route to the map
+                folium.PolyLine(locations=[(coord[1], coord[0]) for coord in route], color='blue', weight=5, opacity=0.7).add_to(m)
+
+                # Display the map
+                st.subheader("Route Map:")
+                folium_static(m)  # Use folium_static to render the map in Streamlit
+
+                # Display real-time weather for start and destination
+                start_weather = get_weather(start_point)
+                end_weather = get_weather(end_point)
+
+                if start_weather:
+                    temp = start_weather['main']['temp']
+                    description = start_weather['weather'][0]['description']
+                    st.info(f"🌡️ Weather in {start_point}: {temp}°C, {description}")
+
+                if end_weather:
+                    temp = end_weather['main']['temp']
+                    description = end_weather['weather'][0]['description']
+                    st.info(f"🌡️ Weather in {end_point}: {temp}°C, {description}")
+
+            else:
+                st.error("No directions found. Please check the locations.")
+        else:
+            st.error("Error retrieving coordinates. Please check your input.")
     else:
-        shortest_path, total_distance = find_shortest_path(G, start, end, weight='distance')
-        
-        if shortest_path and total_distance:
-            st.success(f"Shortest path from {start} to {end}: {shortest_path}")
-            st.success(f"Total distance: {total_distance:.2f} km")
-
-            # Plot the graph with the path
-            plot_graph(G, shortest_path)
+        st.error("Please enter both starting and destination locations.")
